@@ -53,16 +53,18 @@ float circle_spacing = 6.4; //spacing between centers of columns/rows
 int circle_rows = 4;	    //note pair of staggered rows counts as 1 row
 int circle_cols = 11;
 
-CvMat* cam_mat;
+CvMat* cam_mat, *extrinsics;
+CvMat *invExt, *invInt;
 CvMat* dist_coeff;
 
 //Modes
 std::string modeDetail[] = {
   "Calibration pattern"
-  , "Detect cue ball"
+  , "Detect cue ball using circle detection"
+  , "Detect cue ball using blob detection"
 };
 
-int mode = 0;
+int mode = 2;
 int numModes = sizeof(modeDetail)/sizeof(modeDetail[0]);
 FILE* pFile;
 
@@ -79,21 +81,14 @@ using namespace cv;
 float lastRot[3] = {0};
 float lastTrans[3] = {0};
 
+void printMat(Mat curr) {
+  printf("rows: %d cols: %d \n", curr.rows, curr.cols);
+  std::cout << format(curr, "c") << std::endl << std::endl; 
+}
+
 void PrintError( FlyCapture2::Error error ) {
   error.PrintErrorTrace();
 }
-
-// void printMat2(cvMat curr) {
-//   int rows = curr.rows;
-//   int cols = curr.cols;
-  
-//   for(int i = 0; i < rows; i++) {
-//     for(int j = 0; j < cols; j++) {
-//       printf("%f, ", CV_MAT_ELEM(curr, float, i, j));
-//     }
-//     printf("\n");
-//   }
-// }
 
 void saveImage() {
   cvSaveImage("./outputs/imgOrig.jpg", imgOrig);
@@ -115,30 +110,6 @@ void saveHSVImage() {
 }
 
 void detectCalibrationPattern() {
-
-  //undistort
-  cvUndistort2(imgResize, img, cam_mat, dist_coeff);
-
-  //upload to texture
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, screenWidth/scaleFactor, screenHeight/scaleFactor, 0, GL_BGR, GL_UNSIGNED_BYTE, img->imageData);
-
-  //draw video frame in background
-  glDepthMask(GL_FALSE);
-  glEnable(GL_TEXTURE_2D);
-  glColor3f(1,1,1);
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(0,1,0,1,-1,1);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  glBegin(GL_QUADS);
-  glTexCoord2f(0,1); glVertex2f(0,0); //account for camera being mounted upside down
-  glTexCoord2f(1,1); glVertex2f(1,0);
-  glTexCoord2f(1,0); glVertex2f(1,1);
-  glTexCoord2f(0,0); glVertex2f(0,1);
-  glEnd();
-  glDepthMask(GL_TRUE);
 
   //detect circles/checkerboard
   bool success = false;
@@ -235,6 +206,9 @@ void detectCalibrationPattern() {
     CV_MAT_ELEM(*xform, float, 2, 3) = CV_MAT_ELEM(*trans, float, 2, 0);
     CV_MAT_ELEM(*xform, float, 3, 3) = 1;
 
+    if(first)
+      cvSave("extrinsics.xml", xform);
+
     if(first) {
       std::cout << "xform = " << std::endl << " " << format(xform, "c") << std::endl << std::endl;
     }
@@ -309,107 +283,354 @@ void detectCalibrationPattern() {
   }
 
   first = false;
-
 }
 
-// void detectCueball2() {
-//   cv::Mat matOrig(imgOrig), resultImg;
-//   cv::SimpleBlobDetector::Params params;
-//   params.minDistBetweenBlobs = 1;
+float median1ch (cv::Mat image) {
+  double m=(image.rows*image.cols)/2;
+  int bin = 0;
+  float med;
+  med =-1;
+  int histSize = 256;
+  float range[] = { 0, 256 } ;
+  const float* histRange = { range };
+  bool uniform = true;
+  bool accumulate = false;
+  cv::Mat hist;
+  cv::calcHist( &image, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange, uniform, accumulate );
 
-
-//   // By area
-//   params.filterByArea = true;
-//   // The values below are obtained from the color picker tool in gimp
-//   params.minArea = 20*20;
-//   params.maxArea = 34*34;
-
-//   // By circularity
-//   params.filterByCircularity = true;
-//   params.minCircularity = 0.8f;
-//   params.maxCircularity = 1.0f;
- 
-//   // By color
-//   params.filterByColor = true;
-//   params.blobColor = cvScalar(150, 200, 45);
-
-//   SimpleBlobDetector blobDetector(params);
-//   blobDetector.create("SimpleBlob");
- 
-//   vector<KeyPoint> keypoints;
-  
-//   blobDetector.detect(matOrig, keypoints);
-//   drawKeypoints(matOrig, blob, resultImg, DrawMatchesFlags::DEFAULT);
- 
-//   imshow("Blobs", resultImg);
-// }
-
-
-void detectCueball() {
-
-  //upload to texture
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, screenWidth/scaleFactor, screenHeight/scaleFactor, 0, GL_BGR, GL_UNSIGNED_BYTE, imgOrig->imageData);
-
-  //draw video frame in background
-  glDepthMask(GL_FALSE);
-  glEnable(GL_TEXTURE_2D);
-  glColor3f(1,1,1);
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(0,1,0,1,-1,1);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  glBegin(GL_QUADS);
-  glTexCoord2f(0,1); glVertex2f(0,0); //account for camera being mounted upside down
-  glTexCoord2f(1,1); glVertex2f(1,0);
-  glTexCoord2f(1,0); glVertex2f(1,1);
-  glTexCoord2f(0,0); glVertex2f(0,1);
-  glEnd();
-  glDepthMask(GL_TRUE);
-
-  //Start with imgOrig
-  IplImage *hsvImg, *inRangesImg, *labelImg;
-  cvb::CvBlobs blobs;
-  hsvImg = cvCreateImage(cvSize(screenWidth,screenHeight),IPL_DEPTH_8U,3);
-  inRangesImg = cvCreateImage(cvSize(screenWidth,screenHeight),IPL_DEPTH_8U,1);
-  labelImg = cvCreateImage(cvSize(screenWidth,screenHeight),IPL_DEPTH_LABEL,1);
-
-  cvCvtColor(imgOrig, hsvImg, CV_BGR2HSV);
-  cvInRangeS(hsvImg, cvScalar(45, 175, 20), cvScalar(270, 230, 60), inRangesImg);
-
-  cvShowImage("image", inRangesImg);
-  cvWaitKey(1000);
-
-  cvSmooth(inRangesImg, inRangesImg, CV_MEDIAN, 3, 3);
-  unsigned int result = cvb::cvLabel(inRangesImg, labelImg, blobs);
- 
-}
-
-void detectCircles() {
-
-  Mat matOrig(imgOrig);
-  Mat matGray;
-  cvtColor( matOrig, matGray, CV_BGR2GRAY );
-  GaussianBlur( matGray, matGray, Size(7,7), 2, 2);
-  
-  vector<Vec3f> circles;
-  
-  HoughCircles( matGray, circles, CV_HOUGH_GRADIENT, 1, 1, 20, 20, 10, 20);
-
-  for(size_t i = 0; i < circles.size(); i++) {
-    Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
-    int radius = cvRound(circles[i][2]);
-    // circle center
-    circle( matOrig, center, 3, Scalar(0,255,0), -1, 8, 0 );
-    // circle outline
-    circle( matOrig, center, radius, Scalar(0,0,255), 3, 8, 0 );
+  for (int i=0; i<256 && ( med <0 );i++) {
+    bin = bin + cvRound(hist.at<float>(i));
+    if (bin>m && med<0)
+      med=i;
   }
 
-  namedWindow( "Hough Circle Transform Demo", CV_WINDOW_AUTOSIZE );
-  imshow( "Hough Circle Transform Demo", matOrig );
-  waitKey(1000);
+  return med;
 }
+
+cv::Scalar median3ch (cv::Mat image) {
+  double m=(image.rows*image.cols)/2;
+  int bin0=0, bin1=0, bin2=0;
+  cv::Scalar med;
+  med.val[0]=-1;
+  med.val[1]=-1;
+  med.val[2]=-1;
+  int histSize = 256;
+  float range[] = { 0, 256 } ;
+  const float* histRange = { range };
+  bool uniform = true;
+  bool accumulate = false;
+  cv::Mat hist0, hist1, hist2;
+  std::vector<cv::Mat> channels;
+  cv::split( image, channels );
+  cv::calcHist( &channels[0], 1, 0, cv::Mat(), hist0, 1, &histSize, &histRange, uniform, accumulate );
+  cv::calcHist( &channels[1], 1, 0, cv::Mat(), hist1, 1, &histSize, &histRange, uniform, accumulate );
+  cv::calcHist( &channels[2], 1, 0, cv::Mat(), hist2, 1, &histSize, &histRange, uniform, accumulate );
+
+  for (int i=0; i<256 && ( med.val[0]<0 || med.val[1]<0 || med.val[2]<0);i++)
+    {
+      bin0=bin0+cvRound(hist0.at<float>(i));
+      bin1=bin1+cvRound(hist1.at<float>(i));
+      bin2=bin2+cvRound(hist2.at<float>(i));
+      if (bin0>m && med.val[0]<0)
+	med.val[0]=i;
+      if (bin1>m && med.val[1]<0)
+	med.val[1]=i;
+      if (bin2>m && med.val[2]<0)
+	med.val[2]=i;
+    }
+
+  return med;
+}
+
+void detectBlobs() {
+
+  IplImage *hsvImg;
+  IplImage *H, *S, *V;
+  hsvImg = cvCreateImage(cvSize(screenWidth,screenHeight),IPL_DEPTH_8U,3);
+
+  cvCvtColor(img, hsvImg, CV_BGR2HSV);
+
+  H = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
+  S = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
+  V = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
+
+  cvSplit(hsvImg, H, S, V, NULL);
+  // cvSaveImage("./outputs/H.jpg", H);
+  // cvSaveImage("./outputs/S.jpg", S);
+  // cvSaveImage("./outputs/V.jpg", V);
+
+  Mat oH1(H), oS1(S), oV1(V);
+  Mat mH1;
+  Mat resultImg;
+
+
+  inRange(oH1, Scalar(50), Scalar(55), mH1);
+  medianBlur(mH1, mH1, 9);
+  morphologyEx(mH1, mH1, MORPH_CLOSE, Mat(), Point(-1, -1), 1);
+  bitwise_not(mH1, mH1);
+ 
+  SimpleBlobDetector::Params params;
+  params.minDistBetweenBlobs = 1;
+
+  params.filterByInertia = false;
+  params.filterByConvexity = false;
+  params.filterByColor = false;
+  params.filterByCircularity = true;
+  params.filterByArea = true;
+
+  params.minArea = 100.0f;
+  params.minCircularity = 0.8f;
+  params.maxCircularity = 1.0f;
+
+  Ptr<FeatureDetector> blobDetector = new SimpleBlobDetector(params);
+  blobDetector->create("SimpleBlob");
+ 
+  vector<KeyPoint> keypoints;
+  blobDetector->detect(mH1, keypoints);
+  
+  // drawKeypoints(oH1, keypoints, resultImg, Scalar::all(255), DrawMatchesFlags::DEFAULT);
+
+  // imshow("Blobs", resultImg);
+  // // imshow("oH1", oH1);
+  // // imshow("mH1", mH1);
+  // waitKey(1);
+
+  // Converting the keypoint to 3D coordinates
+ 
+  // if(first) {
+  //   std::cout << "cam_mat = " << std::endl << " " << format(cam_mat, "c") << std::endl << std::endl;
+  //   std::cout << "invInt = " << std::endl << " " << format(invInt, "c") << std::endl << std::endl; 
+  //   std::cout << "extrinsics = " << std::endl << " " << format(extrinsics, "c") << std::endl << std::endl; 
+  //   std::cout << "invExt = " << std::endl << " " << format(invExt, "c") << std::endl << std::endl; 
+  // }
+
+  Mat mInt(cam_mat), mExt(extrinsics), mInvInt(invInt), mInvExt(invExt);
+
+  // Prefixes: 
+  // wc - world coordinates
+  // cc - camera coordinates
+
+  Mat wcWOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
+  Mat wcWXpoint = (Mat_<float>(4,1) << 1.0, 0.0, 0.0, 1.0 );
+  Mat wcWYpoint = (Mat_<float>(4,1) << 0.0, 1.0, 0.0, 1.0 );
+  Mat wcWZpoint = (Mat_<float>(4,1) << 0.0, 0.0, 1.0, 1.0 );
+
+  Mat ccWOrigin = mExt * wcWOrigin;
+  Mat ccWXpoint = mExt * wcWXpoint;
+  Mat ccWYpoint = mExt * wcWYpoint;
+  Mat ccWZpoint = mExt * wcWZpoint;
+
+  Mat ccWXaxis = ccWXpoint - ccWOrigin;
+  Mat ccWYaxis = ccWYpoint - ccWOrigin;
+  Mat ccWZaxis = ccWZpoint - ccWOrigin;
+
+  // Normal to the plane
+  normalize(ccWZaxis, ccWZaxis);
+
+  // printf(" %d %d \n", wcWOrigin.rows, wcWOrigin.cols);
+  // if(first) {
+  //   printf("normalize z axis \n"); printMat(ccWZaxis);
+  // }
+
+  // Distance from camera origin to plane along plane's normal
+  Mat mDistance = ccWOrigin.t() * ccWZaxis;
+
+  // if(first) {
+  //   printf("Distance \n"); printMat(mDistance);
+  // }
+
+ 
+  // Need to get keypoints in the x, y form
+  // if(first) {
+  //   for(int i = 0; i < keypoints.size(); i++) {
+  //     printf("%f %f \n", keypoints[i].pt.x, keypoints[i].pt.y);
+  //   }
+  // }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // Sort the keypoints according to their HSV values:
+  Mat medH;
+  float medh;
+  int pixelRadius = 10;
+  for(int i = 0; i < keypoints.size(); i++) {
+    Rect roi( floor(keypoints[i].pt.x) - pixelRadius, floor(keypoints[i].pt.y) - pixelRadius, 2*pixelRadius, 2*pixelRadius );
+    Mat roiImg = oV1( roi );
+    medh = median1ch(roiImg);
+    medH.push_back(medh);
+  }
+
+  Mat sortOrder;
+  sortIdx(medH, sortOrder, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+  sort(medH, medH, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+
+  // if(first) {
+  //   printf("Sort order \n");
+  //   printMat(sortOrder);
+  //   printf("Sorted array \n");
+  // printMat(medH);
+  // }
+  normalize(medH, medH);
+  // medH = (1.0f/255.0f)*medH;
+
+  vector<KeyPoint> sortedKeypoints;
+  for(int i = 0; i < keypoints.size(); i++) 
+    sortedKeypoints.push_back(keypoints[sortOrder.at<int>(i,0)]);
+  
+  // if(first) {
+  //   printf("Sorted keypoints \n");
+  //   for(int i = 0; i < sortedKeypoints.size(); i++) {
+  //     printf("%f %f \n", sortedKeypoints[i].pt.x, sortedKeypoints[i].pt.y);
+  //   }
+  // }
+
+  // // Getting the median color of each cue ball
+  // Mat medianColorVals;
+  // Mat matImg(img);
+  // Scalar med;
+  // for(int i = 0; i < sortedKeypoints.size(); i++) {
+  //   Rect roi( floor(sortedKeypoints[i].pt.x) - pixelRadius, floor(sortedKeypoints[i].pt.y) - pixelRadius, 2*pixelRadius, 2*pixelRadius );
+  //   Mat roiImg = matImg( roi );
+  //   med = mean(roiImg);
+  //   if(i == 4){
+  //     imshow("roiImg", roiImg);
+  //     waitKey(1);
+  //   }
+  //   Mat currTranspose;
+  //   transpose(med, currTranspose);
+  //   currTranspose = (1.0f/255.0f) * currTranspose;
+  //   // normalize(currTranspose, currTranspose);
+  //   // if(i == 0) {
+  //   //   imshow("roiImg", roiImg);
+  //   //   printMat(currTranspose);
+  //   //   waitKey(1);
+  //   // }
+  //   medianColorVals.push_back(currTranspose);
+  // }
+
+  // if(first) {
+  //   printf("Median Color Vals \n");
+  //   printMat(medianColorVals);
+  //   medianColorVals.convertTo(medianColorVals, CV_32FC1);
+  //   printMat(medianColorVals);
+  // }
+
+  Mat keypoints3D;
+  for(int i = 0; i < keypoints.size(); i++) {
+    // Finding the 3D cooridinates only for the first keypoint - for now
+    Mat pt2d = (Mat_<float>(3,1) << keypoints[sortOrder.at<int>(i,0)].pt.x, keypoints[sortOrder.at<int>(i,0)].pt.y, 1.0 );
+    // Mat pt2d = (Mat_<float>(3,1) << sortedKeypoints[i].pt.x, sortedKeypoints[i].pt.y, 1.0 );
+    Mat ccPt3d = invInt * pt2d; 
+
+ 
+    // Determining the direction of ray traveling between the center of projection to the detected 2D keypoint
+    Mat ccCOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
+    Mat ccRay;
+    normalize(ccPt3d, ccRay);
+    Mat lastElement = (Mat_<float>(1,1) << 0.0 );
+    ccRay.push_back(lastElement);
+  
+    // Ray plane intersection: 
+    // Distance to travel along ray to hit plane
+    Mat t = ccRay.t()*ccWZaxis;
+    t = mDistance / t;
+
+    // Point on plane where the ray intersects
+    float scalart = t.at<float>(0,0);
+    Mat ccIntPt = ccCOrigin + scalart*ccRay;
+    // Converting intersection point from camera coordinates to world coordinates
+
+    // printf("ccIntPt \n");
+    // printMat(ccIntPt);
+
+    Mat wcIntPt = invExt * ccIntPt;
+    wcIntPt = wcIntPt.t();
+    keypoints3D.push_back(wcIntPt);
+
+  }
+
+  // Drawing the keypoints and lines between them
+
+  float mat[16];
+  for(int i = 0; i < 16; i++) {
+    mat[i] = CV_MAT_ELEM(*extrinsics, float, i%4, i/4);
+  }
+
+  glEnable(GL_DEPTH_TEST);
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+
+  float w = imgPlaneWidth/focalLength*near, h = imgPlaneHeight/focalLength*near;
+
+  glFrustum(-imageCenter[0]/imageWidth*w, (imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[1]/imageHeight*h,(imageHeight-imageCenter[1])/imageHeight*h, near, far); 
+
+  //flip l,r and b,t to account for camera being upside down
+  //glFrustum((imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[0]/imageWidth*w,  (imageHeight-imageCenter[1])/imageHeight*h, -imageCenter[1]/imageHeight*h, near, far); 
+
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glScalef(1,-1,-1);
+  glMultMatrixf(mat);
+
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4f(1,0,1, 0.5);
+
+  for(int i = 0; i < keypoints.size(); i++) {
+    glPushMatrix();
+    glTranslatef(keypoints3D.at<float>(i,0),keypoints3D.at<float>(i,1), 0.0f);
+    float currColor = (float)i/(float)keypoints.size();;
+    if(first)
+      printf("%f \n", currColor);
+    glColor3f(currColor, currColor, currColor);
+    glutSolidSphere(2.858, 100, 4);
+    glPopMatrix();
+  }
+  // glBegin(GL_QUADS);
+  // glEnd();
+
+  // glPointSize(15);
+  // glBegin(GL_POINTS);
+  // glColor3f(1,0,0); glVertex2f(keypoints3D.at<float>(0,0),keypoints3D.at<float>(0,1));
+  // glColor3f(0,1,0); glVertex2f(keypoints3D.at<float>(1,0),keypoints3D.at<float>(1,1));
+  // glColor3f(0,0,1); glVertex2f(keypoints3D.at<float>(2,0),keypoints3D.at<float>(2,1));
+  // glEnd();
+  // glBegin(GL_LINES);
+  // glColor3f(1,1,0); glVertex3f(0,0,0); glVertex3f(0,0,50);
+  // glEnd();
+
+  first = false;
+  if(true) {
+    cvReleaseImage(&H);
+    cvReleaseImage(&S);
+    cvReleaseImage(&V);
+    cvReleaseImage(&hsvImg);
+    return;
+  }
+
+}
+
+
 
 void glutDisplay() {
 
@@ -459,13 +680,38 @@ void glutDisplay() {
   //downsample
   cvResize(imgOrig, imgResize, CV_INTER_LINEAR);
 
+  //undistort
+  cvUndistort2(imgResize, img, cam_mat, dist_coeff);
+
+  //upload to texture
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, screenWidth/scaleFactor, screenHeight/scaleFactor, 0, GL_BGR, GL_UNSIGNED_BYTE, img->imageData);
+
+  //draw video frame in background
+  glDepthMask(GL_FALSE);
+  glEnable(GL_TEXTURE_2D);
+  glColor3f(1,1,1);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(0,1,0,1,-1,1);
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glBegin(GL_QUADS);
+  glTexCoord2f(0,1); glVertex2f(0,0); //account for camera being mounted upside down
+  glTexCoord2f(1,1); glVertex2f(1,0);
+  glTexCoord2f(1,0); glVertex2f(1,1);
+  glTexCoord2f(0,0); glVertex2f(0,1);
+  glEnd();
+  glDepthMask(GL_TRUE);
+
   if(mode == 0) 
     detectCalibrationPattern();
 
-  if(mode == 1)
-    detectCircles();
+  // if(mode == 1)
+  //   detectCircles();
 
-    // detectCueball();
+  if(mode == 2) 
+    detectBlobs();
 
   glutSwapBuffers();
 }
@@ -628,6 +874,13 @@ int main(int argc, char** argv) {
     printf("can't load camera calibration, exiting...\n");
     exit(1);
   }
+
+  extrinsics = (CvMat*)cvLoad("extrinsics.xml", NULL, NULL, NULL);
+  invExt = cvCreateMat(4, 4, CV_32FC1);
+  invInt = cvCreateMat(3, 3, CV_32FC1);
+  // Finding inverse of extrinsics and cam_mat to compare with Matlab 
+  cvInvert(extrinsics, invExt);
+  cvInvert(cam_mat, invInt);
 
   glutMainLoop();
 
