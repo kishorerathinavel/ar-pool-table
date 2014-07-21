@@ -53,22 +53,22 @@ float circle_spacing = 6.4; //spacing between centers of columns/rows
 int circle_rows = 4;	    //note pair of staggered rows counts as 1 row
 int circle_cols = 11;
 
-CvMat* cam_mat, *extrinsics;
+CvMat *cam_mat, *extrinsics;
 CvMat *invExt, *invInt;
-CvMat* dist_coeff;
+CvMat *dist_coeff;
 
 //Modes
 std::string modeDetail[] = {
   "Calibration pattern"
   , "Detect cue ball using circle detection"
   , "Detect cue ball using blob detection"
+  , "Calibrating for the pocket positions"
+  , "Displaying last found shot"
 };
 
 int mode = 2;
 int numModes = sizeof(modeDetail)/sizeof(modeDetail[0]);
 FILE* pFile;
-
-// Cueball colors
 
 // Saving images
 bool tSaveImage = false, tSaveHSVImage = false;
@@ -78,12 +78,31 @@ bool first = true;
 
 using namespace cv;
 
+// Global variables for 2d to 3d conversion.
+Mat wcWOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
+Mat wcWXpoint = (Mat_<float>(4,1) << 1.0, 0.0, 0.0, 1.0 );
+Mat wcWYpoint = (Mat_<float>(4,1) << 0.0, 1.0, 0.0, 1.0 );
+Mat wcWZpoint = (Mat_<float>(4,1) << 0.0, 0.0, 1.0, 1.0 );
+Mat ccCOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
+
+Mat mInt, mExt, mInvInt, mInvExt;
+
+Mat ccWOrigin, ccWXpoint, ccWYpoint, ccWZpoint, ccWXaxis, ccWYaxis, ccWZaxis, mDistance;
+// Mat mInt(cam_mat), mExt(extrinsics), mInvInt(invInt), mInvExt(invExt);
+
+Mat pocketPositions;
+int maxPocketPos = 6, countKnownPocketPos = 0;
+
 float lastRot[3] = {0};
 float lastTrans[3] = {0};
+float matExt[16];
 
 void printMat(Mat curr) {
   printf("rows: %d cols: %d \n", curr.rows, curr.cols);
-  std::cout << format(curr, "c") << std::endl << std::endl; 
+  for(int i = 0; i < curr.rows; i++) {
+    std::cout << format(curr.row(i), "c") << std::endl; 
+  }
+  std::cout << std::endl;
 }
 
 void PrintError( FlyCapture2::Error error ) {
@@ -213,18 +232,17 @@ void detectCalibrationPattern() {
       std::cout << "xform = " << std::endl << " " << format(xform, "c") << std::endl << std::endl;
     }
 
-    float mat[16];
     for(int i = 0; i < 16; i++) {
-      mat[i] = CV_MAT_ELEM(*xform, float, i%4, i/4);
-      //printf("%f, ", mat[i]);
+      matExt[i] = CV_MAT_ELEM(*xform, float, i%4, i/4);
+      //printf("%f, ", matExt[i]);
     }
     //printf("\n");
 
     // if(first) {
-    //   std::cout << "mat = " << std::endl << " " << format(mat, "c") << std::endl << std::endl;
+    //   std::cout << "matExt = " << std::endl << " " << format(matExt, "c") << std::endl << std::endl;
     // }
 
-    // sendMatrix(mat);
+    // sendMatrix(matExt);
 
     glEnable(GL_DEPTH_TEST);
 
@@ -240,7 +258,7 @@ void detectCalibrationPattern() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glScalef(1,-1,-1);
-    glMultMatrixf(mat);
+    glMultMatrixf(matExt);
 
     //glRotatef(90,1,0,0);
     //glRotatef(-90,0,1,0);
@@ -342,6 +360,54 @@ cv::Scalar median3ch (cv::Mat image) {
   return med;
 }
 
+void init2Dto3Dconversion() {
+
+  ccWOrigin = mExt * wcWOrigin;
+  ccWXpoint = mExt * wcWXpoint;
+  ccWYpoint = mExt * wcWYpoint;
+  ccWZpoint = mExt * wcWZpoint;
+
+  ccWXaxis = ccWXpoint - ccWOrigin;
+  ccWYaxis = ccWYpoint - ccWOrigin;
+  ccWZaxis = ccWZpoint - ccWOrigin;
+
+  // Normal to the plane
+  normalize(ccWZaxis, ccWZaxis);
+
+  // Distance from camera origin to plane along plane's normal
+  mDistance = ccWOrigin.t() * ccWZaxis;
+
+  for(int i = 0; i < 16; i++) {
+    matExt[i] = CV_MAT_ELEM(*extrinsics, float, i%4, i/4);
+  }
+}
+
+Mat convert2Dto3D (Mat pt2d) {
+
+  // Mat pt2d = (Mat_<float>(3,1) << sortedKeypoints[i].pt.x, sortedKeypoints[i].pt.y, 1.0 );
+  Mat ccPt3d = invInt * pt2d; 
+
+ 
+  // Determining the direction of ray traveling between the center of projection to the detected 2D keypoint
+  Mat ccRay;
+  normalize(ccPt3d, ccRay);
+  Mat lastElement = (Mat_<float>(1,1) << 0.0 );
+  ccRay.push_back(lastElement);
+  
+  // Ray plane intersection: 
+  // Distance to travel along ray to hit plane
+  Mat t = ccRay.t()*ccWZaxis;
+  t = mDistance / t;
+
+  // Point on plane where the ray intersects
+  float scalart = t.at<float>(0,0);
+  Mat ccIntPt = ccCOrigin + scalart*ccRay;
+  // Converting intersection point from camera coordinates to world coordinates
+
+  Mat wcIntPt = invExt * ccIntPt;
+  return wcIntPt;
+}
+
 void detectBlobs() {
 
   IplImage *hsvImg;
@@ -353,12 +419,16 @@ void detectBlobs() {
   H = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
   S = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
   V = cvCreateImage(cvSize(screenWidth/scaleFactor,screenHeight/scaleFactor),IPL_DEPTH_8U,1);
-
+  
   cvSplit(hsvImg, H, S, V, NULL);
-  // cvSaveImage("./outputs/H.jpg", H);
-  // cvSaveImage("./outputs/S.jpg", S);
-  // cvSaveImage("./outputs/V.jpg", V);
 
+  // if(first) {
+  //   cvSaveImage("./outputs/imgOrig.jpg", imgOrig);
+  //   cvSaveImage("./outputs/img.jpg", img);
+  //   cvSaveImage("./outputs/H.jpg", H);
+  //   cvSaveImage("./outputs/S.jpg", S);
+  //   cvSaveImage("./outputs/V.jpg", V);
+  // }
   Mat oH1(H), oS1(S), oV1(V);
   Mat mH1;
   Mat resultImg;
@@ -368,6 +438,9 @@ void detectBlobs() {
   medianBlur(mH1, mH1, 9);
   morphologyEx(mH1, mH1, MORPH_CLOSE, Mat(), Point(-1, -1), 1);
   bitwise_not(mH1, mH1);
+
+  imshow("mH1",mH1);
+  waitKey(1);
  
   SimpleBlobDetector::Params params;
   params.minDistBetweenBlobs = 1;
@@ -387,13 +460,17 @@ void detectBlobs() {
  
   vector<KeyPoint> keypoints;
   blobDetector->detect(mH1, keypoints);
-  
-  // drawKeypoints(oH1, keypoints, resultImg, Scalar::all(255), DrawMatchesFlags::DEFAULT);
 
-  // imshow("Blobs", resultImg);
-  // // imshow("oH1", oH1);
-  // // imshow("mH1", mH1);
-  // waitKey(1);
+  if(keypoints.size() == 0)  {
+    first = false;
+    cvReleaseImage(&H);
+    cvReleaseImage(&S);
+    cvReleaseImage(&V);
+    cvReleaseImage(&hsvImg);
+    return;
+  }
+
+  // drawKeypoints(oH1, keypoints, resultImg, Scalar::all(255), DrawMatchesFlags::DEFAULT);
 
   // Converting the keypoint to 3D coordinates
  
@@ -404,175 +481,79 @@ void detectBlobs() {
   //   std::cout << "invExt = " << std::endl << " " << format(invExt, "c") << std::endl << std::endl; 
   // }
 
-  Mat mInt(cam_mat), mExt(extrinsics), mInvInt(invInt), mInvExt(invExt);
-
   // Prefixes: 
   // wc - world coordinates
   // cc - camera coordinates
 
-  Mat wcWOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
-  Mat wcWXpoint = (Mat_<float>(4,1) << 1.0, 0.0, 0.0, 1.0 );
-  Mat wcWYpoint = (Mat_<float>(4,1) << 0.0, 1.0, 0.0, 1.0 );
-  Mat wcWZpoint = (Mat_<float>(4,1) << 0.0, 0.0, 1.0, 1.0 );
-
-  Mat ccWOrigin = mExt * wcWOrigin;
-  Mat ccWXpoint = mExt * wcWXpoint;
-  Mat ccWYpoint = mExt * wcWYpoint;
-  Mat ccWZpoint = mExt * wcWZpoint;
-
-  Mat ccWXaxis = ccWXpoint - ccWOrigin;
-  Mat ccWYaxis = ccWYpoint - ccWOrigin;
-  Mat ccWZaxis = ccWZpoint - ccWOrigin;
-
-  // Normal to the plane
-  normalize(ccWZaxis, ccWZaxis);
-
-  // printf(" %d %d \n", wcWOrigin.rows, wcWOrigin.cols);
-  // if(first) {
-  //   printf("normalize z axis \n"); printMat(ccWZaxis);
-  // }
-
-  // Distance from camera origin to plane along plane's normal
-  Mat mDistance = ccWOrigin.t() * ccWZaxis;
-
-  // if(first) {
-  //   printf("Distance \n"); printMat(mDistance);
-  // }
-
- 
-  // Need to get keypoints in the x, y form
-  // if(first) {
-  //   for(int i = 0; i < keypoints.size(); i++) {
-  //     printf("%f %f \n", keypoints[i].pt.x, keypoints[i].pt.y);
-  //   }
-  // }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Sort the keypoints according to their HSV values:
+  // Finding out the white cue ball
   Mat medH;
-  float medh;
+  Scalar medh;
   int pixelRadius = 10;
   for(int i = 0; i < keypoints.size(); i++) {
     Rect roi( floor(keypoints[i].pt.x) - pixelRadius, floor(keypoints[i].pt.y) - pixelRadius, 2*pixelRadius, 2*pixelRadius );
-    Mat roiImg = oV1( roi );
-    medh = median1ch(roiImg);
-    medH.push_back(medh);
+    if(0 <= roi.x && 0 <= roi.width && roi.x + roi.width <= oV1.cols && 0 <= roi.y && 0 <= roi.height && roi.y + roi.height <= oV1.rows) {
+      Mat roiImg = oV1( roi );
+      medh = mean(roiImg);
+      medH.push_back(medh[0]);
+    }
+    else{
+      printf("%d %d %d %d \n", roi.x, roi.y, roi.width, roi.height);
+      exit(1);
+    }
+  }
+  medH.convertTo(medH, CV_32FC1);
+
+  // Mat sortOrder;
+  // sortIdx(medH, sortOrder, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+  // sort(medH, medH, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+
+  int whiteIdx = 0;
+  float min = 100000;
+  float max = -1;
+  for(int i = 0; i < medH.rows; i++) {
+    // Using the highest mean from Value channel
+    if(medH.at<float>(i,0) > max){
+      max = medH.at<float>(i,0);
+      whiteIdx = i;
+    }
+
+    // // Using the difference between the mean and the hue value of 19 (determined from gimp)
+    // float diff = medH.at<float>(i,0) - 19;
+    // // if(first)
+    // //   printf("diff %f \n", diff);
+    // if(diff*diff < min) {
+    //   min = diff*diff;
+    //   whiteIdx = i;
+    // }
+  }
+  // printf("whiteIdx = %d \n", whiteIdx);
+  // vector<KeyPoint> sortedKeypoints;
+  // for(int i = 0; i < keypoints.size(); i++) 
+  //   sortedKeypoints.push_back(keypoints[sortOrder.at<int>(i,0)]);
+  
+  Mat keypoints3D;
+  Mat cuePos;
+  for(int i = 0; i < keypoints.size(); i++) {
+    Mat pt2d = (Mat_<float>(3,1) << keypoints[i].pt.x, keypoints[i].pt.y, 1.0 );
+    Mat wcIntPt = convert2Dto3D(pt2d);
+    wcIntPt = wcIntPt.t();
+    
+    if(i == whiteIdx)
+      cuePos = wcIntPt;
+    else
+      keypoints3D.push_back(wcIntPt);
   }
 
-  Mat sortOrder;
-  sortIdx(medH, sortOrder, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
-  sort(medH, medH, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
-
-  // if(first) {
-  //   printf("Sort order \n");
-  //   printMat(sortOrder);
-  //   printf("Sorted array \n");
-  // printMat(medH);
-  // }
-  normalize(medH, medH);
-  // medH = (1.0f/255.0f)*medH;
-
-  vector<KeyPoint> sortedKeypoints;
-  for(int i = 0; i < keypoints.size(); i++) 
-    sortedKeypoints.push_back(keypoints[sortOrder.at<int>(i,0)]);
-  
-  // if(first) {
-  //   printf("Sorted keypoints \n");
-  //   for(int i = 0; i < sortedKeypoints.size(); i++) {
-  //     printf("%f %f \n", sortedKeypoints[i].pt.x, sortedKeypoints[i].pt.y);
-  //   }
-  // }
-
-  // // Getting the median color of each cue ball
-  // Mat medianColorVals;
-  // Mat matImg(img);
-  // Scalar med;
-  // for(int i = 0; i < sortedKeypoints.size(); i++) {
-  //   Rect roi( floor(sortedKeypoints[i].pt.x) - pixelRadius, floor(sortedKeypoints[i].pt.y) - pixelRadius, 2*pixelRadius, 2*pixelRadius );
-  //   Mat roiImg = matImg( roi );
-  //   med = mean(roiImg);
-  //   if(i == 4){
-  //     imshow("roiImg", roiImg);
-  //     waitKey(1);
-  //   }
-  //   Mat currTranspose;
-  //   transpose(med, currTranspose);
-  //   currTranspose = (1.0f/255.0f) * currTranspose;
-  //   // normalize(currTranspose, currTranspose);
-  //   // if(i == 0) {
-  //   //   imshow("roiImg", roiImg);
-  //   //   printMat(currTranspose);
-  //   //   waitKey(1);
-  //   // }
-  //   medianColorVals.push_back(currTranspose);
-  // }
-
-  // if(first) {
-  //   printf("Median Color Vals \n");
-  //   printMat(medianColorVals);
-  //   medianColorVals.convertTo(medianColorVals, CV_32FC1);
-  //   printMat(medianColorVals);
-  // }
-
-  Mat keypoints3D;
-  for(int i = 0; i < keypoints.size(); i++) {
-    // Finding the 3D cooridinates only for the first keypoint - for now
-    Mat pt2d = (Mat_<float>(3,1) << keypoints[sortOrder.at<int>(i,0)].pt.x, keypoints[sortOrder.at<int>(i,0)].pt.y, 1.0 );
-    // Mat pt2d = (Mat_<float>(3,1) << sortedKeypoints[i].pt.x, sortedKeypoints[i].pt.y, 1.0 );
-    Mat ccPt3d = invInt * pt2d; 
-
- 
-    // Determining the direction of ray traveling between the center of projection to the detected 2D keypoint
-    Mat ccCOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
-    Mat ccRay;
-    normalize(ccPt3d, ccRay);
-    Mat lastElement = (Mat_<float>(1,1) << 0.0 );
-    ccRay.push_back(lastElement);
-  
-    // Ray plane intersection: 
-    // Distance to travel along ray to hit plane
-    Mat t = ccRay.t()*ccWZaxis;
-    t = mDistance / t;
-
-    // Point on plane where the ray intersects
-    float scalart = t.at<float>(0,0);
-    Mat ccIntPt = ccCOrigin + scalart*ccRay;
-    // Converting intersection point from camera coordinates to world coordinates
-
-    // printf("ccIntPt \n");
-    // printMat(ccIntPt);
-
-    Mat wcIntPt = invExt * ccIntPt;
-    wcIntPt = wcIntPt.t();
-    keypoints3D.push_back(wcIntPt);
-
+  if(keypoints3D.rows == 0) {
+    first = false;
+    cvReleaseImage(&H);
+    cvReleaseImage(&S);
+    cvReleaseImage(&V);
+    cvReleaseImage(&hsvImg);
+    return;
   }
 
   // Drawing the keypoints and lines between them
-
-  float mat[16];
-  for(int i = 0; i < 16; i++) {
-    mat[i] = CV_MAT_ELEM(*extrinsics, float, i%4, i/4);
-  }
 
   glEnable(GL_DEPTH_TEST);
 
@@ -589,47 +570,148 @@ void detectBlobs() {
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
   glScalef(1,-1,-1);
-  glMultMatrixf(mat);
+  glMultMatrixf(matExt);
 
   glDisable(GL_TEXTURE_2D);
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glColor4f(1,0,1, 0.5);
 
-  for(int i = 0; i < keypoints.size(); i++) {
+  // Drawing the white sphere over the white cue ball
+  glPushMatrix();
+  glTranslatef(cuePos.at<float>(0,0),cuePos.at<float>(0,1), 0.0f);
+  glColor3f(1.0, 1.0, 1.0);
+  glutSolidSphere(2.858, 100, 4);
+  glPopMatrix();
+
+  for(int i = 0; i < keypoints3D.rows; i++) {
     glPushMatrix();
     glTranslatef(keypoints3D.at<float>(i,0),keypoints3D.at<float>(i,1), 0.0f);
-    float currColor = (float)i/(float)keypoints.size();;
-    if(first)
-      printf("%f \n", currColor);
-    glColor3f(currColor, currColor, currColor);
+    glColor3f(0.7, 0.7, 0.7);
     glutSolidSphere(2.858, 100, 4);
     glPopMatrix();
-  }
-  // glBegin(GL_QUADS);
-  // glEnd();
 
+    // glBegin(GL_LINES);
+    // glColor3f(1,1,0); 
+    // glVertex3f(keypoints3D.at<float>(i,0),keypoints3D.at<float>(i,1), 0.0f); 
+    // glVertex3f(cuePos.at<float>(0,0), cuePos.at<float>(0,1), 0.0f);
+    // glEnd();
+  }
+
+  // Getting rid of the 3rd and 4th column which contributes nothing further. 
+  cuePos = cuePos.colRange(0, 2);
+  pocketPositions = pocketPositions.colRange(0,2);
+  keypoints3D = keypoints3D.colRange(0,2);
+
+  // if(first) {
+  //   printMat(cuePos);
+  //   printMat(pocketPositions);
+  //   printMat(keypoints3D);
+  // }
+
+  glPointSize(15);
+  float maxDotProduct = -100;
+  int nearestKeypointId = 0;
+  int bestPocketPos = -1;
+  Mat sC, sF, sD;
+  for(int i = 0; i < maxPocketPos; i++) {
+    // Drawing Pocket position
+    glBegin(GL_POINTS);
+    glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
+    glEnd();
+
+    for(int j = 0; j < keypoints3D.rows; j++) {
+      // Determining the line from cue to pocket:
+      Mat finalDirection = pocketPositions.row(i) - keypoints3D.row(j);
+      normalize(finalDirection, finalDirection);
+
+      // Determining the line from cue to keypoint
+      Mat coarseHitDirection = keypoints3D.row(j) - cuePos;
+      normalize(coarseHitDirection, coarseHitDirection);
+      
+      // Determining the keypoint which lies closest to the ideal direction
+      Mat dotProduct = coarseHitDirection*finalDirection.t();
+      if(dotProduct.at<float>(0,0) > maxDotProduct) {
+	sF = finalDirection;
+	sC = coarseHitDirection;
+	sD = dotProduct;
+	maxDotProduct = dotProduct.at<float>(0,0);
+	nearestKeypointId = j;
+	bestPocketPos = i;
+      }
+
+    } 
+  }
+  // printf("maxDotProduct = %f \n", maxDotProduct);
+  // printMat(sF);
+  // printMat(sC);
+  // printMat(sD);
+  // Determining fine hit direction:
+  Mat hitCuePos = keypoints3D.row(nearestKeypointId) - sF*2*2.858;
+  glPushMatrix();
+  glTranslatef(hitCuePos.at<float>(0,0), hitCuePos.at<float>(0,1), 0.0f);
+  glColor4f(0.1, 0.1, 0.1, 0.5);
+  glutSolidSphere(2.858, 100, 4);
+  glPopMatrix();
+
+
+  glBegin(GL_LINES);
+  glColor3f(1,1,0); 
+  glVertex3f(cuePos.at<float>(0,0), cuePos.at<float>(0,1), 0.0f);
+  glVertex3f(hitCuePos.at<float>(0,0),hitCuePos.at<float>(0,1), 0.0f); 
+  glVertex3f(keypoints3D.at<float>(nearestKeypointId,0),keypoints3D.at<float>(nearestKeypointId,1), 0.0f); 
+  glVertex3f(pocketPositions.at<float>(bestPocketPos, 0), pocketPositions.at<float>(bestPocketPos, 1), 0.0f);
+  glEnd();
+
+
+  // Calculating positions of pocket positions
+  // Mat pocketPositions;
+  // float cm2ft = 60.96, cm4ft = 121.92;
+  
+  // for(int  i = -1; i < 2; i++){ // x axis for longer side
+  //   for(int j = -1; j < 2; j = j+2) { // y axis for shorter side
+  //     Mat currPocketPos = (Mat_<float>(4,1) << i*cm4ft, j*cm2ft, 0.0, 1.0);
+  //     currPocketPos = currPocketPos.t();
+  //     pocketPositions.push_back(currPocketPos);
+  //   }
+  // }
+
+  // // Drawing pockets to determine the correct translation and rotation needed to align them to the board
   // glPointSize(15);
-  // glBegin(GL_POINTS);
-  // glColor3f(1,0,0); glVertex2f(keypoints3D.at<float>(0,0),keypoints3D.at<float>(0,1));
-  // glColor3f(0,1,0); glVertex2f(keypoints3D.at<float>(1,0),keypoints3D.at<float>(1,1));
-  // glColor3f(0,0,1); glVertex2f(keypoints3D.at<float>(2,0),keypoints3D.at<float>(2,1));
-  // glEnd();
-  // glBegin(GL_LINES);
-  // glColor3f(1,1,0); glVertex3f(0,0,0); glVertex3f(0,0,50);
-  // glEnd();
+  // for(int i = 0; i < pocketPositions.rows; i++) {
+  //   glBegin(GL_POINTS);
+  //   glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
+  //   glEnd();
+  // }
+  
+  // 
 
+
+ 
   first = false;
-  if(true) {
-    cvReleaseImage(&H);
-    cvReleaseImage(&S);
-    cvReleaseImage(&V);
-    cvReleaseImage(&hsvImg);
-    return;
-  }
+  cvReleaseImage(&H);
+  cvReleaseImage(&S);
+  cvReleaseImage(&V);
+  cvReleaseImage(&hsvImg);
+  return;
 
 }
 
+void getPocketPositions(int x, int y) {
+
+  Mat pt2d = (Mat_<float>(3,1) << x, y, 1.0 );
+  Mat pt3d = convert2Dto3D(pt2d);
+  pt3d = pt3d.t();
+  pocketPositions.push_back(pt3d);
+  countKnownPocketPos++;
+  if(countKnownPocketPos == maxPocketPos) {
+    FileStorage file("pocketPositions.xml", FileStorage::WRITE);
+    file << "pocketPositions" << pocketPositions;
+    file.release();
+    mode = 2;
+  }
+
+}
 
 
 void glutDisplay() {
@@ -706,9 +788,6 @@ void glutDisplay() {
 
   if(mode == 0) 
     detectCalibrationPattern();
-
-  // if(mode == 1)
-  //   detectCircles();
 
   if(mode == 2) 
     detectBlobs();
@@ -841,6 +920,18 @@ int initPointGreyCamera() {
 
 }
 
+
+void mouseButton(int button, int state, int x, int y) {
+  if( mode == 3) {
+    switch(button) {
+    case GLUT_LEFT_BUTTON:
+      if(state == GLUT_UP) {
+	getPocketPositions(x, y); break;
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
 
   // PointGrey init
@@ -853,6 +944,7 @@ int main(int argc, char** argv) {
   glutCreateWindow ("Camera Capture");
   glutDisplayFunc(glutDisplay); 
   glutKeyboardFunc(keyPressed);
+  glutMouseFunc(mouseButton);
   glutIdleFunc(glutIdle);
 
   //create texture
@@ -874,13 +966,37 @@ int main(int argc, char** argv) {
     printf("can't load camera calibration, exiting...\n");
     exit(1);
   }
+  invInt = cvCreateMat(3, 3, CV_32FC1);
+  cvInvert(cam_mat, invInt);
+
 
   extrinsics = (CvMat*)cvLoad("extrinsics.xml", NULL, NULL, NULL);
-  invExt = cvCreateMat(4, 4, CV_32FC1);
-  invInt = cvCreateMat(3, 3, CV_32FC1);
-  // Finding inverse of extrinsics and cam_mat to compare with Matlab 
-  cvInvert(extrinsics, invExt);
-  cvInvert(cam_mat, invInt);
+  if(extrinsics == NULL) {
+    printf("Extrinsics file not found. Place the circle grid pattern on the table \n");
+    mode = 0;
+  }
+  else {
+    invExt = cvCreateMat(4, 4, CV_32FC1);
+    cvInvert(extrinsics, invExt);
+
+    //    Check for pocket position matrix
+    FileStorage file("pocketPositions.xml", FileStorage::READ);
+    file["pocketPositions"] >> pocketPositions;
+    file.release();
+    // pocketPositions = (CvMat*)cvLoad("pocketPositions.xml", NULL, NULL, NULL);
+    if(pocketPositions.rows == 0) {
+      printf("Pocket positions matrix not found. Click on the 6 pocket positions in the image. \n");
+      mode = 3;
+    }
+    else
+      countKnownPocketPos = maxPocketPos;
+
+    mInt = cam_mat;
+    mExt = extrinsics;
+    mInvInt = invInt;
+    mInvExt = invExt;
+    init2Dto3Dconversion();
+  }
 
   glutMainLoop();
 
