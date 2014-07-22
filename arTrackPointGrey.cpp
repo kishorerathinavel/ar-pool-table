@@ -15,9 +15,6 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
-//cvblob
-#include <cvblob.h>
-
 //ximea calibration
 float imgPlaneWidth = 1024*0.0046875;	//sensor size
 float imgPlaneHeight = 768*0.0046875;
@@ -60,38 +57,42 @@ CvMat *dist_coeff;
 //Modes
 std::string modeDetail[] = {
   "Calibration pattern"
-  , "Detect cue ball using circle detection"
   , "Detect cue ball using blob detection"
   , "Calibrating for the pocket positions"
   , "Displaying last found shot"
 };
 
-int mode = 2;
+int mode = 1;
 int numModes = sizeof(modeDetail)/sizeof(modeDetail[0]);
 FILE* pFile;
 
 // Saving images
 bool tSaveImage = false, tSaveHSVImage = false;
 
-// misc
-bool first = true;
+bool first = true, tSim = false;
 
 using namespace cv;
+using namespace std;
 
-// Global variables for 2d to 3d conversion.
+RNG rng(12345);
+
+// For 2d to 3d conversion.
 Mat wcWOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
 Mat wcWXpoint = (Mat_<float>(4,1) << 1.0, 0.0, 0.0, 1.0 );
 Mat wcWYpoint = (Mat_<float>(4,1) << 0.0, 1.0, 0.0, 1.0 );
 Mat wcWZpoint = (Mat_<float>(4,1) << 0.0, 0.0, 1.0, 1.0 );
 Mat ccCOrigin = (Mat_<float>(4,1) << 0.0, 0.0, 0.0, 1.0 );
-
+Mat ccWOrigin, ccWXpoint, ccWYpoint, ccWZpoint, ccWXaxis, ccWYaxis, ccWZaxis, mDistance;
 Mat mInt, mExt, mInvInt, mInvExt;
 
-Mat ccWOrigin, ccWXpoint, ccWYpoint, ccWZpoint, ccWXaxis, ccWYaxis, ccWZaxis, mDistance;
-// Mat mInt(cam_mat), mExt(extrinsics), mInvInt(invInt), mInvExt(invExt);
+// For drawing the shot
+Mat whiteCue, targetCue, prevWhiteCue, prevTargetCue, finalWhiteCuePos;
+int targetPocket = -1, targetedCue = 0;
+bool moveWhite;
 
+// For calculating the shot
 Mat pocketPositions;
-int maxPocketPos = 6, countKnownPocketPos = 0;
+int maxPocketPos = 6, countKnownPocketPos = 0, simCount = 0, maxCount = 10;
 
 float lastRot[3] = {0};
 float lastTrans[3] = {0};
@@ -225,8 +226,7 @@ void detectCalibrationPattern() {
     CV_MAT_ELEM(*xform, float, 2, 3) = CV_MAT_ELEM(*trans, float, 2, 0);
     CV_MAT_ELEM(*xform, float, 3, 3) = 1;
 
-    if(first)
-      cvSave("extrinsics.xml", xform);
+    cvSave("extrinsics.xml", xform);
 
     if(first) {
       std::cout << "xform = " << std::endl << " " << format(xform, "c") << std::endl << std::endl;
@@ -408,8 +408,9 @@ Mat convert2Dto3D (Mat pt2d) {
   return wcIntPt;
 }
 
-void detectBlobs() {
+void calculateShot() {
 
+  targetPocket = -1;
   IplImage *hsvImg;
   IplImage *H, *S, *V;
   hsvImg = cvCreateImage(cvSize(screenWidth,screenHeight),IPL_DEPTH_8U,3);
@@ -422,28 +423,86 @@ void detectBlobs() {
   
   cvSplit(hsvImg, H, S, V, NULL);
 
-  // if(first) {
-  //   cvSaveImage("./outputs/imgOrig.jpg", imgOrig);
-  //   cvSaveImage("./outputs/img.jpg", img);
-  //   cvSaveImage("./outputs/H.jpg", H);
-  //   cvSaveImage("./outputs/S.jpg", S);
-  //   cvSaveImage("./outputs/V.jpg", V);
-  // }
+  if(first) {
+    cvSaveImage("./outputs/imgOrig.jpg", imgOrig);
+    cvSaveImage("./outputs/img.jpg", img);
+    cvSaveImage("./outputs/H.jpg", H);
+    cvSaveImage("./outputs/S.jpg", S);
+    cvSaveImage("./outputs/V.jpg", V);
+  }
   Mat oH1(H), oS1(S), oV1(V);
-  Mat mH1;
+  Mat mH1, mH2, mH3, mH4, mH5;
   Mat resultImg;
 
 
-  inRange(oH1, Scalar(50), Scalar(55), mH1);
-  medianBlur(mH1, mH1, 9);
-  morphologyEx(mH1, mH1, MORPH_CLOSE, Mat(), Point(-1, -1), 1);
-  bitwise_not(mH1, mH1);
+  inRange(oH1, Scalar(42), Scalar(55), mH1);
+  // imshow("Stage 2", mH1);
+  morphologyEx(mH1, mH1, MORPH_OPEN, Mat(), Point(-1, -1), 2);
+  // imshow("Stage 3", mH1);
+  morphologyEx(mH1, mH1, MORPH_CLOSE, Mat(), Point(-1, -1), 25);
+  bitwise_and(oH1, mH1, mH2);
+  // imshow("Stage 5", mH2);
+  // if(first) 
+  //   imwrite("./outputs/roi.jpg", mH2);
+  inRange(mH2, Scalar(0), Scalar(40), mH3);
+  bitwise_and(mH1, mH3, mH3);
+  // imshow("Stage 6", mH3);
+  inRange(mH2, Scalar(54), Scalar(255), mH4);
+  bitwise_or(mH3, mH4, mH5);
+  morphologyEx(mH5, mH5, MORPH_CLOSE, Mat(), Point(-1, -1), 4);
+  medianBlur(mH5, mH5, 3);
+  // imshow("Stage 7", mH5);
 
-  imshow("mH1",mH1);
-  waitKey(1);
- 
+  mH1 = mH5;
+  // imshow("mH1", mH1);
+  // waitKey(1);
+  // medianBlur(mH1, mH1, 9);
+  // waitKey(1);
+  // morphologyEx(mH1, mH1, MORPH_CLOSE, Mat(), Point(-1, -1), 5);
+  // medianBlur(mH1, mH1, 9);
+  // imshow("Stage 3", mH1);
+  // waitKey(1);
+  // bitwise_not(mH1, mH1);
+  // imshow("Stage 4", mH1);
+  // waitKey(1);
+
+  // vector<vector<Point> > contours;
+  // vector<Vec4i> hierarchy;
+  // findContours(mH1, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0,0));
+  // /// Draw contours
+  // Mat drawing = Mat::zeros( oH1.size(), CV_8UC3 );
+  // for( int i = 0; i< contours.size(); i++ ) {
+  //   Scalar color = Scalar( rng.uniform(0, 255), rng.uniform(0,255), rng.uniform(0,255) );
+  //   drawContours( drawing, contours, i, color, 2, 8, hierarchy, 0, Point() );
+  // }
+
+  // /// Get the moments
+  // vector<Moments> mu(contours.size() );
+  // for( int i = 0; i < contours.size(); i++ )
+  //   { mu[i] = moments( contours[i], false ); }
+
+  // ///  Get the mass centers:
+  // vector<Point2f> mc( contours.size() );
+  // for( int i = 0; i < contours.size(); i++ )
+  //   { mc[i] = Point2f( mu[i].m10/mu[i].m00 , mu[i].m01/mu[i].m00 ); }   /// Show in a window
+
+  // namedWindow( "Contours", CV_WINDOW_AUTOSIZE );
+  // imshow( "Contours", drawing );
+
+  // if(true) {
+  //   waitKey(1);
+  //   first = false;
+  //   cvReleaseImage(&H);
+  //   cvReleaseImage(&S);
+  //   cvReleaseImage(&V);
+  //   cvReleaseImage(&hsvImg);
+  //   return;
+  // }
+
+
+
   SimpleBlobDetector::Params params;
-  params.minDistBetweenBlobs = 1;
+  params.minDistBetweenBlobs = 10;
 
   params.filterByInertia = false;
   params.filterByConvexity = false;
@@ -452,8 +511,7 @@ void detectBlobs() {
   params.filterByArea = true;
 
   params.minArea = 100.0f;
-  params.minCircularity = 0.8f;
-  params.maxCircularity = 1.0f;
+  params.minCircularity = 0.6f;
 
   Ptr<FeatureDetector> blobDetector = new SimpleBlobDetector(params);
   blobDetector->create("SimpleBlob");
@@ -470,9 +528,22 @@ void detectBlobs() {
     return;
   }
 
+  // std::cout << keypoints.size() << std::endl;
   // drawKeypoints(oH1, keypoints, resultImg, Scalar::all(255), DrawMatchesFlags::DEFAULT);
+  // imshow("resultImg", resultImg);
+  // waitKey(1);
 
-  // Converting the keypoint to 3D coordinates
+  // if(true) {
+  //   waitKey(1);
+  //   first = false;
+  //   cvReleaseImage(&H);
+  //   cvReleaseImage(&S);
+  //   cvReleaseImage(&V);
+  //   cvReleaseImage(&hsvImg);
+  //   return;
+  // }
+
+   // Converting the keypoint to 3D coordinates
  
   // if(first) {
   //   std::cout << "cam_mat = " << std::endl << " " << format(cam_mat, "c") << std::endl << std::endl;
@@ -498,7 +569,7 @@ void detectBlobs() {
     }
     else{
       printf("%d %d %d %d \n", roi.x, roi.y, roi.width, roi.height);
-      exit(1);
+      continue;
     }
   }
   medH.convertTo(medH, CV_32FC1);
@@ -581,14 +652,14 @@ void detectBlobs() {
   glPushMatrix();
   glTranslatef(cuePos.at<float>(0,0),cuePos.at<float>(0,1), 0.0f);
   glColor3f(1.0, 1.0, 1.0);
-  glutSolidSphere(2.858, 100, 4);
+  glutSolidSphere(2.858, 100, 100);
   glPopMatrix();
 
   for(int i = 0; i < keypoints3D.rows; i++) {
     glPushMatrix();
     glTranslatef(keypoints3D.at<float>(i,0),keypoints3D.at<float>(i,1), 0.0f);
     glColor3f(0.7, 0.7, 0.7);
-    glutSolidSphere(2.858, 100, 4);
+    glutSolidSphere(2.858, 100, 100);
     glPopMatrix();
 
     // glBegin(GL_LINES);
@@ -609,39 +680,53 @@ void detectBlobs() {
   //   printMat(keypoints3D);
   // }
 
-  glPointSize(15);
-  float maxDotProduct = -100;
-  int nearestKeypointId = 0;
-  int bestPocketPos = -1;
-  Mat sC, sF, sD;
   for(int i = 0; i < maxPocketPos; i++) {
     // Drawing Pocket position
     glBegin(GL_POINTS);
     glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
     glEnd();
-
-    for(int j = 0; j < keypoints3D.rows; j++) {
-      // Determining the line from cue to pocket:
-      Mat finalDirection = pocketPositions.row(i) - keypoints3D.row(j);
-      normalize(finalDirection, finalDirection);
-
-      // Determining the line from cue to keypoint
-      Mat coarseHitDirection = keypoints3D.row(j) - cuePos;
-      normalize(coarseHitDirection, coarseHitDirection);
-      
-      // Determining the keypoint which lies closest to the ideal direction
-      Mat dotProduct = coarseHitDirection*finalDirection.t();
-      if(dotProduct.at<float>(0,0) > maxDotProduct) {
-	sF = finalDirection;
-	sC = coarseHitDirection;
-	sD = dotProduct;
-	maxDotProduct = dotProduct.at<float>(0,0);
-	nearestKeypointId = j;
-	bestPocketPos = i;
-      }
-
-    } 
   }
+
+  glPointSize(15);
+  float maxDotProduct = -100;
+  int nearestKeypointId = 0;
+  int bestPocketPos = -1;
+  Mat sC, sF, sD;
+  Mat allDotProducts;
+  targetedCue = targetedCue%keypoints3D.rows;
+
+    
+  for(int i = 0; i < maxPocketPos; i++) {
+    // Determining the line from cue to pocket:
+    Mat finalDirection = pocketPositions.row(i) - keypoints3D.row(targetedCue);
+    normalize(finalDirection, finalDirection);
+
+    // Determining the line from cue to keypoint
+    Mat coarseHitDirection = keypoints3D.row(targetedCue) - cuePos;
+    normalize(coarseHitDirection, coarseHitDirection);
+      
+    // Determining the keypoint which lies closest to the ideal direction
+    Mat dotProduct = coarseHitDirection*finalDirection.t();
+    allDotProducts.push_back(dotProduct);
+    if(dotProduct.at<float>(0,0) > maxDotProduct) {
+      sF = finalDirection;
+      sC = coarseHitDirection;
+      sD = dotProduct;
+      maxDotProduct = dotProduct.at<float>(0,0);
+      nearestKeypointId = targetedCue;
+      bestPocketPos = i;
+    }
+  } 
+
+  // Mat sortOrder;
+  // sortIdx(allDotProducts, sortOrder, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+  // // sort(allDotProducts, allDotProducts, CV_SORT_EVERY_COLUMN + CV_SORT_ASCENDING);
+
+  // if(first) {
+  //   printMat(allDotProducts);
+  //   printMat(sortOrder);
+  // }
+
   // printf("maxDotProduct = %f \n", maxDotProduct);
   // printMat(sF);
   // printMat(sC);
@@ -651,10 +736,11 @@ void detectBlobs() {
   glPushMatrix();
   glTranslatef(hitCuePos.at<float>(0,0), hitCuePos.at<float>(0,1), 0.0f);
   glColor4f(0.1, 0.1, 0.1, 0.5);
-  glutSolidSphere(2.858, 100, 4);
+  glutSolidSphere(2.858, 100, 100);
   glPopMatrix();
 
 
+  glLineWidth(6.0f);
   glBegin(GL_LINES);
   glColor3f(1,1,0); 
   glVertex3f(cuePos.at<float>(0,0), cuePos.at<float>(0,1), 0.0f);
@@ -663,30 +749,14 @@ void detectBlobs() {
   glVertex3f(pocketPositions.at<float>(bestPocketPos, 0), pocketPositions.at<float>(bestPocketPos, 1), 0.0f);
   glEnd();
 
-
-  // Calculating positions of pocket positions
-  // Mat pocketPositions;
-  // float cm2ft = 60.96, cm4ft = 121.92;
-  
-  // for(int  i = -1; i < 2; i++){ // x axis for longer side
-  //   for(int j = -1; j < 2; j = j+2) { // y axis for shorter side
-  //     Mat currPocketPos = (Mat_<float>(4,1) << i*cm4ft, j*cm2ft, 0.0, 1.0);
-  //     currPocketPos = currPocketPos.t();
-  //     pocketPositions.push_back(currPocketPos);
-  //   }
-  // }
-
-  // // Drawing pockets to determine the correct translation and rotation needed to align them to the board
-  // glPointSize(15);
-  // for(int i = 0; i < pocketPositions.rows; i++) {
-  //   glBegin(GL_POINTS);
-  //   glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
-  //   glEnd();
-  // }
-  
-  // 
-
-
+  mode = 4;
+  moveWhite = true;
+  whiteCue = cuePos;
+  prevWhiteCue = cuePos;
+  finalWhiteCuePos = hitCuePos;
+  targetCue = keypoints3D.row(nearestKeypointId);
+  prevTargetCue = keypoints3D.row(nearestKeypointId);
+  targetPocket = bestPocketPos;
  
   first = false;
   cvReleaseImage(&H);
@@ -708,8 +778,160 @@ void getPocketPositions(int x, int y) {
     FileStorage file("pocketPositions.xml", FileStorage::WRITE);
     file << "pocketPositions" << pocketPositions;
     file.release();
-    mode = 2;
+    mode = 1;
   }
+
+}
+
+void simShot() {
+ 
+  if(targetPocket == -1) {
+    mode = 1;
+    return;
+  }
+  glEnable(GL_DEPTH_TEST);
+  glPointSize(15);
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+
+  float w = imgPlaneWidth/focalLength*near, h = imgPlaneHeight/focalLength*near;
+
+  glFrustum(-imageCenter[0]/imageWidth*w, (imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[1]/imageHeight*h,(imageHeight-imageCenter[1])/imageHeight*h, near, far); 
+
+  //flip l,r and b,t to account for camera being upside down
+  //glFrustum((imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[0]/imageWidth*w,  (imageHeight-imageCenter[1])/imageHeight*h, -imageCenter[1]/imageHeight*h, near, far); 
+
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glScalef(1,-1,-1);
+  glMultMatrixf(matExt);
+
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4f(1,0,1, 0.5);
+
+  for(int i = 0; i < maxPocketPos; i++) {
+    // Drawing Pocket position
+    glBegin(GL_POINTS);
+    glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
+    glEnd();
+  }
+
+  // Need to set the speed based on how far away the target cue is from the target pocket
+  Mat diff = pocketPositions.row(targetPocket) - targetCue;
+  Mat sqDiff = diff*diff.t();
+  maxCount = sqrt(sqDiff.at<int>(0,0))/3000;
+
+  Mat currWhiteCue, currTargetCue;
+  float ratio = (float)simCount/maxCount;
+
+  if(moveWhite) {
+    currWhiteCue = whiteCue*(1 - ratio) + targetCue*ratio;
+    currTargetCue = targetCue;
+  }
+  else {
+    currWhiteCue = prevWhiteCue;
+    currTargetCue = targetCue*(1 - ratio) + pocketPositions.row(targetPocket)*ratio;
+  } 
+  
+  for(int i = 0; i < maxPocketPos; i++) {
+    // Drawing Pocket position
+    glBegin(GL_POINTS);
+    glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
+    glEnd();
+  }
+
+  // Drawing the white cue
+  glPushMatrix();
+  glTranslatef(currWhiteCue.at<float>(0,0),currWhiteCue.at<float>(0,1), 0.0f);
+  glColor3f(1.0, 1.0, 1.0);
+  glutSolidSphere(2.858, 100, 100);
+  glPopMatrix();
+
+  // Drawing the target cue
+  glPushMatrix();
+  glTranslatef(currTargetCue.at<float>(0,0),currTargetCue.at<float>(0,1), 0.0f);
+  glColor3f(0.7, 0.7, 0.7);
+  glutSolidSphere(2.858, 100, 100);
+  glPopMatrix();
+
+  simCount = ++simCount%maxCount;
+  prevTargetCue = currTargetCue;
+  prevWhiteCue = currWhiteCue;
+  if(simCount == 0) 
+    moveWhite = !moveWhite;
+
+}
+
+
+void drawShot() {
+
+  if(targetPocket == -1) {
+    mode = 1;
+    return;
+  }
+  glEnable(GL_DEPTH_TEST);
+  glPointSize(15);
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+
+  float w = imgPlaneWidth/focalLength*near, h = imgPlaneHeight/focalLength*near;
+
+  glFrustum(-imageCenter[0]/imageWidth*w, (imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[1]/imageHeight*h,(imageHeight-imageCenter[1])/imageHeight*h, near, far); 
+
+  //flip l,r and b,t to account for camera being upside down
+  //glFrustum((imageWidth-imageCenter[0])/imageWidth*w, -imageCenter[0]/imageWidth*w,  (imageHeight-imageCenter[1])/imageHeight*h, -imageCenter[1]/imageHeight*h, near, far); 
+
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glScalef(1,-1,-1);
+  glMultMatrixf(matExt);
+
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4f(1,0,1, 0.5);
+
+  for(int i = 0; i < maxPocketPos; i++) {
+    // Drawing Pocket position
+    glBegin(GL_POINTS);
+    glColor3f(1,1,1); glVertex2f(pocketPositions.at<float>(i,0), pocketPositions.at<float>(i,1));
+    glEnd();
+  }
+
+  // Drawing the white cue
+  glPushMatrix();
+  glTranslatef(whiteCue.at<float>(0,0),whiteCue.at<float>(0,1), 0.0f);
+  glColor3f(1.0, 1.0, 1.0);
+  glutSolidSphere(2.858, 100, 100);
+  glPopMatrix();
+
+  // Drawing the final white cue position
+  glPushMatrix();
+  glTranslatef(finalWhiteCuePos.at<float>(0,0),finalWhiteCuePos.at<float>(0,1), 0.0f);
+  glColor4f(0.1, 0.1, 0.1, 0.5);
+  glutSolidSphere(2.858, 100, 100);
+  glPopMatrix();
+
+  // Drawing the target cue
+  glPushMatrix();
+  glTranslatef(targetCue.at<float>(0,0),targetCue.at<float>(0,1), 0.0f);
+  glColor3f(0.7, 0.7, 0.7);
+  glutSolidSphere(2.858, 100, 100);
+  glPopMatrix();
+
+  // Drawing lines
+  glLineWidth(6.0f);
+  glBegin(GL_LINES);
+  glColor3f(1,1,0); 
+  glVertex3f(whiteCue.at<float>(0,0), whiteCue.at<float>(0,1), 0.0f);
+  glVertex3f(finalWhiteCuePos.at<float>(0,0),finalWhiteCuePos.at<float>(0,1), 0.0f); 
+  glVertex3f(targetCue.at<float>(0,0),targetCue.at<float>(0,1), 0.0f); 
+  glVertex3f(pocketPositions.at<float>(targetPocket, 0), pocketPositions.at<float>(targetPocket, 1), 0.0f);
+  glEnd();
 
 }
 
@@ -789,8 +1011,14 @@ void glutDisplay() {
   if(mode == 0) 
     detectCalibrationPattern();
 
-  if(mode == 2) 
-    detectBlobs();
+  if(mode == 1) 
+    calculateShot();
+
+  if(mode == 4 && tSim == true)
+    simShot();
+
+  if(mode == 4 && tSim == false)
+    drawShot();
 
   glutSwapBuffers();
 }
@@ -830,6 +1058,9 @@ void keyPressed(unsigned char key, int x, int y) {
   case 'm': mode=++mode%numModes; printf("current mode: %s \n", modeDetail[mode].c_str()); break;
   case 'p': tSaveImage = true;    break;
   case 'P': tSaveHSVImage = true; break;
+  case 'R': mode = 1; break;
+  case 't': tSim = !tSim; break;
+  case 'c': targetedCue++; mode = 1; break;
   }
 }
 
@@ -922,7 +1153,7 @@ int initPointGreyCamera() {
 
 
 void mouseButton(int button, int state, int x, int y) {
-  if( mode == 3) {
+  if( mode == 2) {
     switch(button) {
     case GLUT_LEFT_BUTTON:
       if(state == GLUT_UP) {
@@ -986,10 +1217,10 @@ int main(int argc, char** argv) {
     // pocketPositions = (CvMat*)cvLoad("pocketPositions.xml", NULL, NULL, NULL);
     if(pocketPositions.rows == 0) {
       printf("Pocket positions matrix not found. Click on the 6 pocket positions in the image. \n");
-      mode = 3;
+      mode = 2;
     }
     else
-      countKnownPocketPos = maxPocketPos;
+      countKnownPocketPos = pocketPositions.rows;
 
     mInt = cam_mat;
     mExt = extrinsics;
