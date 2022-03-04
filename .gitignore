@@ -1,7 +1,2 @@
 *~
-arTrack
-outputs/
-callgrind*
-code/
-*.tar.gz
-
+*#
